@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from boto3.session import Session
-from botocore.exceptions import ClientError, NoCredentialsError
+from botocore.exceptions import ClientError, NoCredentialsError, WaiterError
 from dateutil.tz.tz import tzlocal
 
 
@@ -70,6 +70,9 @@ class EcsClient(object):
             startedBy=started_by,
             overrides=overrides
         )
+
+    def get_waiter(self, name):
+        return self.boto.get_waiter(name)
 
 
 class EcsService(dict):
@@ -458,6 +461,8 @@ class RunAction(EcsAction):
         self._client = client
         self._cluster_name = cluster_name
         self.started_tasks = []
+        self.failed_tasks = []
+        self.finished_tasks = []
 
     def run(self, task_definition, count, started_by):
         try:
@@ -469,8 +474,27 @@ class RunAction(EcsAction):
                 overrides=dict(containerOverrides=task_definition.get_overrides())
             )
             self.started_tasks = result['tasks']
+            self.failed_tasks = result['failures']
+
             return True
         except ClientError as e:
+            raise EcsError(str(e))
+
+    def wait(self, timeout):
+        try:
+            waiter = self._client.get_waiter('tasks_stopped')
+            tasks = [t['taskArn'] for t in self.started_tasks]
+            waiter.wait(
+                cluster=self._cluster_name,
+                tasks=tasks,
+                WaiterConfig={
+                    'Delay': 1,
+                    'MaxAttempts': timeout,
+                }
+            )
+            self.finished_tasks = self._client.describe_tasks(self._cluster_name, tasks)["tasks"]
+            return True
+        except (ClientError, WaiterError) as e:
             raise EcsError(str(e))
 
 

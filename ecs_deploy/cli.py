@@ -147,14 +147,18 @@ def scale(cluster, service, desired_count, access_key_id, secret_access_key, reg
 @click.argument('cluster')
 @click.argument('task')
 @click.argument('count', required=False, default=1)
+@click.option('-t', '--tag', help='Changes the tag for ALL container images')
+@click.option('-i', '--image', type=(str, str), multiple=True, help='Overwrites the image for a container: <container> <image>')
 @click.option('-c', '--command', type=(str, str), multiple=True, help='Overwrites the command in a container: <container> <command>')
 @click.option('-e', '--env', type=(str, str, str), multiple=True, help='Adds or changes an environment variable: <container> <name> <value>')
+@click.option('--wait/--no-wait', default=False, help='Wait for the task to finish')
 @click.option('--region', help='AWS region (e.g. eu-central-1)')
 @click.option('--access-key-id', help='AWS access key id')
 @click.option('--secret-access-key', help='AWS secret access key')
 @click.option('--profile', help='AWS configuration profile name')
 @click.option('--diff/--no-diff', default=True, help='Print what values were changed in the task definition')
-def run(cluster, task, count, command, env, region, access_key_id, secret_access_key, profile, diff):
+@click.option('--timeout', default=300, type=int, help='Timeout for the task to finish')
+def run(cluster, task, count, tag, image, command, env, wait, region, access_key_id, secret_access_key, profile, diff, timeout):
     """
     Run a one-off task.
 
@@ -164,29 +168,77 @@ def run(cluster, task, count, command, env, region, access_key_id, secret_access
     COMMAND is the number of tasks your service should run.
     """
     try:
+        fail = False
         client = get_client(access_key_id, secret_access_key, region, profile)
         action = RunAction(client, cluster)
 
         td = action.get_task_definition(task)
+        td.set_images(tag, **{key: value for (key, value) in image})
         td.set_commands(**{key: value for (key, value) in command})
         td.set_environment(env)
 
         if diff:
             print_diff(td, 'Using task definition: %s' % task)
 
-        action.run(td, count, 'ECS Deploy')
+        new_td = action.update_task_definition(td)
+        action.run(new_td, count, 'ECS Deploy')
+        action.deregister_task_definition(new_td)
 
-        click.secho(
-            'Successfully started %d instances of task: %s' % (
-                len(action.started_tasks),
-                td.family_revision
-            ),
-            fg='green'
-        )
+        if action.started_tasks:
+            click.secho(
+                'Successfully started %d instances of task: %s' % (
+                    len(action.started_tasks),
+                    new_td.family_revision
+                ),
+                fg='green'
+            )
 
-        for started_task in action.started_tasks:
-            click.secho('- %s' % started_task['taskArn'], fg='green')
+            for started_task in action.started_tasks:
+                click.secho('- %s' % started_task['taskArn'], fg='green')
+
+        # Handle failed tasks if we have any
+        if action.failed_tasks:
+            click.secho(
+                'Couldn\'t start %d instances of task: %s' % (
+                    len(action.failed_tasks),
+                    new_td.family_revision
+                ),
+                fg='red'
+            )
+            for failed_task in action.failed_tasks:
+                click.secho('- %s: %s' % (failed_task['arn'], failed_task["reason"]), fg='red')
+            fail = True
+
+        if wait and action.started_tasks:
+            action.wait(timeout)
+
+        if action.finished_tasks:
+            click.secho(
+                '%d instances of task %s have been finished' % (
+                    len(action.finished_tasks),
+                    new_td.family_revision
+                ),
+                fg='blue'
+            )
+
+            is_task_failed = lambda task: any((container['exitCode'] for container in task['containers']))
+
+            for task in action.finished_tasks:
+                color = 'red' if is_task_failed(task) else 'green'
+                click.secho('- %s: %s' % (
+                    task['taskArn'],
+                    ', '.join(['%s: exit code %d' % (container['name'], container['exitCode']) for container in task['containers']])
+                    ),
+                    fg=color,
+                )
+
+            if any(filter(is_task_failed, action.finished_tasks)):
+                fail = True
+
         click.secho(' ')
+
+        if fail:
+            exit(1)
 
     except EcsError as e:
         click.secho('%s\n' % str(e), fg='red', err=True)
