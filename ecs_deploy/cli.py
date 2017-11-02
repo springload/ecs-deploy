@@ -180,9 +180,11 @@ def run(cluster, task, count, tag, image, command, env, wait, region, access_key
         if diff:
             print_diff(td, 'Using task definition: %s' % task)
 
-        new_td = action.update_task_definition(td)
+        new_td = action.update_task_definition(td) if image or tag else td
+
         action.run(new_td, count, 'ECS Deploy')
-        action.deregister_task_definition(new_td)
+        if image or tag:
+            action.deregister_task_definition(new_td)
 
         if action.started_tasks:
             click.secho(
@@ -221,13 +223,18 @@ def run(cluster, task, count, tag, image, command, env, wait, region, access_key
                 fg='blue'
             )
 
-            is_task_failed = lambda task: any((container['exitCode'] for container in task['containers']))
+            is_task_failed = lambda task: any(
+                (
+                    ('exitCode' in container and container['exitCode'])
+                    or
+                    ('reason' in container and 'error' in container['reason'].lower())
+                ) for container in task['containers'])
 
             for task in action.finished_tasks:
                 color = 'red' if is_task_failed(task) else 'green'
                 click.secho('- %s: %s' % (
                     task['taskArn'],
-                    ', '.join(['%s: exit code %d' % (container['name'], container['exitCode']) for container in task['containers']])
+                    ', '.join(['%s: %s' % (container['name'], ("exit code %d" % container['exitCode']) if 'exitCode' in container else container['reason']) for container in task['containers']])
                     ),
                     fg=color,
                 )
