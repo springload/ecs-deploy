@@ -227,7 +227,7 @@ class EcsTaskDefinition(object):
                     old_value=container.get(u'command')
                 )
                 self._diff.append(diff)
-                container[u'command'] = [new_command]
+                container[u'command'] = self.get_overrides_command(new_command)
 
     def set_environment(self, environment_list):
         environment = {}
